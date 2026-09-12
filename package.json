@@ -1,0 +1,9 @@
+{
+  "name": "voice-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node --env-file-if-exists=.env server.mjs", "test": "node --test test/*.test.mjs" },
+  "dependencies": { "@earendil-works/pi-agent-core": "0.85.1", "@earendil-works/pi-ai": "0.85.1", "@sinclair/typebox": "^0.34.0", "express": "^5.1.0", "ws": "^8.18.0" },
+  "devDependencies": { "playwright": "^1.55.0" }
+}

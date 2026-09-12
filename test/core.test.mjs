@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { defaults, validateConfig, liveInstructions } from '../config.mjs';
+import { Store } from '../store.mjs';
+import { executeTool } from '../agent.mjs';
+function fixture(){const store=new Store(mkdtempSync(join(tmpdir(),'relay-test-')));const call={id:'test-call',mode:'outbound',status:'connected',config:structuredClone(defaults.outbound)};return {store,call};}
+test('profiles isolate modes and reject invalid settings',()=>{const a=validateConfig(structuredClone(defaults.outbound));a.tools.record_note=false;assert.equal(defaults.inbound.tools.record_note,true);assert.throws(()=>validateConfig({...a,model:'invalid'}));assert.throws(()=>validateConfig({...a,maxMinutes:100}));assert.equal(defaults.inbound.tools.take_message,true);assert.equal(defaults.outbound.tools.take_message,false);});
+test('disabled tools disappear from delegation capabilities',()=>{const c=structuredClone(defaults.outbound);c.tools.submit_appointment=false;const policy=liveInstructions(c).split('Backend tools:')[1];assert.ok(!policy.includes('Submit appointment:'));});
+test('tool permission is enforced at execution, records persist and repeat actions deduplicate',()=>{const {store,call}=fixture();call.config.tools.record_note=false;assert.throws(()=>executeTool(call,store,'record_note',{note:'test'}),/disabled/);call.config.tools.record_note=true;const a=executeTool(call,store,'record_note',{note:'Interested in missed-call coverage.'});const b=executeTool(call,store,'record_note',{note:'Interested in missed-call coverage.'});assert.equal(a.recordId,b.recordId);assert.equal(b.duplicate,true);assert.equal(JSON.parse(readFileSync(store.path)).records.length,1);});
+test('appointments require confirmation and valid timezone/date',()=>{const{store,call}=fixture();const args={name:'Test',contact:'demo@example.com',date:'2026-09-18',time:'14:00',timezone:'America/Guayaquil',purpose:'Discovery',confirmed:true};assert.throws(()=>executeTool(call,store,'submit_appointment',{...args,confirmed:false}),/confirmation/);assert.throws(()=>executeTool(call,store,'submit_appointment',{...args,timezone:'bad'}),/timezone/);assert.throws(()=>executeTool(call,store,'submit_appointment',{...args,date:'2026-02-31'}),/Invalid/);assert.equal(executeTool(call,store,'submit_appointment',args).status,'saved_locally');});
+test('hangup and abort block late tool mutations',()=>{const{store,call}=fixture();call.ending=true;assert.throws(()=>executeTool(call,store,'record_note',{note:'late'}),/canceled/);call.ending=false;assert.throws(()=>executeTool(call,store,'record_note',{note:'late'},AbortSignal.abort()),/canceled/);assert.equal(store.state.records.length,0);});
