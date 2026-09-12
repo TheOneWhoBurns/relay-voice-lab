@@ -3,25 +3,20 @@ import { createModels, Type } from '@earendil-works/pi-ai';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { openrouterProvider } from '@earendil-works/pi-ai/providers/openrouter';
 import { catalog, toolInfo } from './config.mjs';
+import { runAgendaTool } from './agenda.mjs';
 const models=createModels(); models.setProvider(openaiProvider()); models.setProvider(openrouterProvider());
 const short=()=>Type.String({minLength:1,maxLength:1500});
 export const schemas = {
-  record_note:Type.Object({ note:short() }),
+  save_lead:Type.Object({ outcome:Type.Union(['interested','not_interested','follow_up','do_not_contact'].map(x=>Type.Literal(x))), detail:short(), name:Type.Optional(short()), contact:Type.Optional(short()) }),
   submit_appointment:Type.Object({ name:short(), contact:short(), date:Type.String({pattern:'^\\d{4}-\\d{2}-\\d{2}$'}), time:Type.String({pattern:'^([01]\\d|2[0-3]):[0-5]\\d$'}), timezone:short(), purpose:short(), confirmed:Type.Literal(true) }),
-  record_outcome:Type.Object({ outcome:Type.Union(['interested','not_interested','callback','do_not_contact'].map(x=>Type.Literal(x))), detail:short() }),
-  take_message:Type.Object({ name:short(), contact:short(), message:short() }),
+  check_availability:Type.Object({date:Type.Optional(Type.String({description:'Optional business-local date YYYY-MM-DD; omit to get the next open slots.'}))}),
 };
 export function executeTool(call, store, name, args, signal) {
   if(signal?.aborted || call.ending || call.status==='closed') throw new Error('Call ended; action canceled.');
-  if(!call.config.tools[name]) throw new Error('This tool is disabled.');
-  if(name==='submit_appointment') {
-    if(args.confirmed!==true) throw new Error('Caller confirmation is required.');
-    try { new Intl.DateTimeFormat('en',{timeZone:args.timezone}); } catch {throw new Error('Ask for a valid timezone, for example America/Guayaquil.');}
-    const date=new Date(args.date+'T'+args.time+':00Z');
-    if(!Number.isFinite(+date)||date.toISOString().slice(0,10)!==args.date)throw new Error('Invalid appointment date.');
-  }
+  if(!Object.hasOwn(schemas,name)||!call.config.tools[name]) throw new Error('This tool is disabled or removed.');
+  const agendaResult=runAgendaTool(call,store,name,args);if(agendaResult)return agendaResult;
   const record=store.record(call.id,call.mode,name,args);
-  return {status:'saved_locally',recordId:record.id,duplicate:!!record.duplicate,details:args,notice:'Demo record only. No invitation, email or real calendar booking was sent.'};
+  return {status:'saved_locally',recordId:record.id,recordSaved:!record.duplicate,duplicate:!!record.duplicate,details:args,notice:'Demo record only. No invitation, email or real calendar booking was sent.'};
 }
 export async function runBackend(call, store, emit) {
   const selected=catalog.find(m=>m.id===call.config.model);
@@ -33,16 +28,16 @@ export async function runBackend(call, store, emit) {
   const runtimeModel=selected.provider==='openrouter'?{...model,api:'openai-completions',baseUrl:'https://openrouter.ai/api/v1'}:model;
   let turns=0;
   const agent=new Agent({
-    initialState:{model:runtimeModel,thinkingLevel:'off',systemPrompt:call.config.backendPrompt,tools:Object.entries(schemas).filter(([name])=>call.config.tools[name]).map(([name,parameters])=>({name,label:toolInfo[name].label,description:toolInfo[name].description,parameters,execute:async(_id,args,signal)=>{const result=executeTool(call,store,name,args,signal);emit('record.saved',{tool:name,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:result};}}))},
+    initialState:{model:runtimeModel,thinkingLevel:'off',systemPrompt:call.config.backendPrompt+`\nApproved business context: ${JSON.stringify(call.config.business)}\nConfigured initial language: ${call.config.language==='en'?'English':'Spanish'}. Follow the caller if they switch.`,tools:Object.entries(schemas).filter(([name])=>call.config.tools[name]).map(([name,parameters])=>({name,label:toolInfo[name].label,description:toolInfo[name].description,parameters,execute:async(_id,args,signal)=>{const result=executeTool(call,store,name,args,signal);if(result.recordSaved)emit('record.saved',{tool:name,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:result};}}))},
     streamFn:(m,c,o)=>models.streamSimple(m,c,{...o,maxTokens:700,onPayload:payload=>{if(selected.routing)payload.provider=selected.routing;}}),
     getApiKey:()=>key, toolExecution:'sequential', maxRetryDelayMs:1500,
-    shouldStopAfterTurn:()=>++turns>=3,
+    shouldStopAfterTurn:()=>++turns>=5,
   });
   call.agent=agent;
   agent.subscribe(event=>{
     if(event.type==='tool_execution_start')emit('tool.started',{tool:event.toolName,args:event.args});
     if(event.type==='tool_execution_end')emit('tool.finished',{tool:event.toolName,isError:event.isError,result:event.result?.details});
-    if(event.type==='message_end'&&event.message.role==='assistant'&&event.message.usage){call.backendUsage.push({model:selected.id,usage:event.message.usage});}
+    if(event.type==='message_end'&&event.message.role==='assistant'&&event.message.usage){call.backendUsage.push({model:selected.id,costKnown:!!found&&selected.provider==='openai',usage:event.message.usage});}
   });
   const groups=[];
   for(const t of call.transcript){const last=groups.at(-1);if(last?.speaker===t.speaker)last.text+=t.delta;else groups.push({speaker:t.speaker,start:t.start_ms,text:t.delta});}
@@ -50,7 +45,7 @@ export async function runBackend(call, store, emit) {
   const records=store.state.records.filter(r=>r.callId===call.id);
   const abort=setTimeout(()=>agent.abort(),25000);
   try {
-    await agent.prompt(`Current time: ${new Date().toISOString()}. Call mode: ${call.mode}.\nComplete voice transcript so far (fragments are continuous and may overlap):\n${history}\n\nSaved records: ${JSON.stringify(records)}\nPrevious backend results: ${JSON.stringify(call.results)}\nHandle the latest delegation using this conversation. A direct request to record a note is sufficient to call record_note; it needs no meeting information or separate confirmation. Appointment confirmation is specific to submit_appointment. If intent or a required detail is unclear, return the next clarification. Never infer appointment confirmation merely from this backend request.`);
+    await agent.prompt(`Current time: ${new Date().toISOString()}. Call mode: ${call.mode}.\nComplete voice transcript so far (fragments are continuous and may overlap):\n${history}\n\nSaved records: ${JSON.stringify(records)}\nPrevious backend results: ${JSON.stringify(call.results)}\nHandle only the latest request. save_lead needs no appointment details; never fabricate a contact. A booking requires explicit caller confirmation, not merely a backend delegation. If intent or required details are unclear, ask the next clarification.`);
     const last=[...agent.state.messages].reverse().find(m=>m.role==='assistant');
     if(!last||last.stopReason==='error'||last.stopReason==='aborted') throw new Error(last?.errorMessage || 'Backend request interrupted.');
     const response=last.content.filter(x=>x.type==='text').map(x=>x.text).join('');

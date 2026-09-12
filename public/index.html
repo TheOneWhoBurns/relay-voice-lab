@@ -1,36 +1,39 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Relay — Voice Lab</title><link rel="stylesheet" href="/style.css"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Aló — Voice Lab</title><link rel="stylesheet" href="/style.css"></head>
 <body>
-<header><a class="brand" href="/" aria-label="Relay Voice Lab"><span class="logo">r</span> relay<span class="brand-divider"></span><span class="lab">VOICE LAB</span></a><div class="header-right"><span class="connection"><i></i> Local sandbox</span><span class="version">v0.1</span></div></header>
+<header><a class="brand" href="/" aria-label="Aló Voice Lab"><span class="logo">a</span> aló<span class="brand-divider"></span><span class="lab">VOICE LAB</span></a><span class="connection"><i></i> Local demo</span></header>
 <main>
-<div class="page-heading"><div><div class="eyebrow">THE CONVERSATION STARTS HERE</div><h1>A voice. A goal. A conversation.</h1><p>Tune your agent, take a call, see what happens.</p></div><span class="api-status" id="api-status">Checking connection…</span></div>
+<div class="page-heading"><div><div class="eyebrow">LESS PHONE WORK. MORE CUSTOMER TIME.</div><h1>From a call to a booked meeting.</h1><p>Alex handles the conversation. You see the booking.</p></div><span class="api-status" id="api-status">Checking connection…</span></div>
 <div class="workspace">
-<section class="panel setup"><div class="panel-heading"><h2>Command center</h2><span class="small-label">01 / CONFIGURE</span></div>
+<section class="panel setup"><div class="panel-heading"><h2>Agent setup</h2><span class="small-label">01 / CONFIGURE</span></div>
 <div class="mode-tabs" role="tablist" aria-label="Call direction"><button role="tab" aria-selected="true" data-mode="outbound">↗ Outbound</button><button role="tab" aria-selected="false" data-mode="inbound">↙ Inbound</button></div>
-<div class="profile-intro"><h3 id="profile-title">The meeting setter</h3><p id="profile-description">A short introduction. A useful question. An invitation to meet.</p></div>
+<div class="profile-intro"><h3 id="profile-title">Sell the meeting.</h3><p id="profile-description">One offer. A conversation. A confirmed time.</p></div>
 <label for="model">Reasoning model <span>PI AGENT</span></label><select id="model"></select><p class="field-hint" id="model-hint"></p>
-<div class="field-pair"><div><label for="voice">Voice</label><select id="voice"><option value="marin">Marin</option><option value="cedar">Cedar</option><option value="gleam">Gleam</option><option value="meridian">Meridian</option><option value="quartz">Quartz</option><option value="vesper">Vesper</option><option value="willow">Willow</option><option value="bossa">Bossa</option></select></div><div><label for="limit">Call limit</label><select id="limit"><option value="1">1 minute</option><option value="3">3 minutes</option><option value="5">5 minutes</option><option value="10">10 minutes</option></select></div></div>
-<div class="section-label"><h3>Instructions</h3><span>EDITABLE</span></div>
 <label for="greeting">Opening line</label><textarea id="greeting" rows="3"></textarea>
-<details open><summary>Voice system prompt</summary><textarea id="prompt" rows="7" aria-label="Voice system prompt"></textarea></details>
-<details><summary>Backend system prompt</summary><textarea id="backend-prompt" rows="8" aria-label="Backend system prompt"></textarea></details>
-<div class="section-label"><h3>Agent tools</h3><span>LOCAL ACTIONS</span></div><div id="tools"></div>
-<div class="save-row"><button id="save" class="button secondary">Save profile</button><button id="reset" class="text-button">Reset</button><span id="save-status" aria-live="polite">Saved</span></div><p class="field-hint">Each mode keeps its own settings. Changes apply to the next call.</p>
+<details><summary>Agent instructions</summary><textarea id="prompt" rows="8" aria-label="Voice system prompt"></textarea></details>
+<div class="section-label"><h3>Three actions. That's it.</h3></div><div id="tools"></div>
+<details class="business-settings"><summary>Business context</summary><label for="business-name">Business name</label><input id="business-name" maxlength="120"><label for="business-timezone">Timezone</label><input id="business-timezone" placeholder="America/Guayaquil"><label for="business-brief">Who are we talking to?</label><textarea id="business-brief" rows="3"></textarea><label for="business-facts">Approved facts</label><textarea id="business-facts" rows="5"></textarea><p class="field-hint">Fictional workshop for testing. Facts go directly to the agent—no lookup tool.</p></details>
+<details><summary>Voice &amp; call limits</summary><label for="language">Initial language</label><select id="language"><option value="es">Español</option><option value="en">English</option></select>
+<div class="field-pair"><div><label for="voice">Voice</label><select id="voice"><option value="marin">Marin</option><option value="cedar">Cedar</option><option value="gleam">Gleam</option><option value="meridian">Meridian</option><option value="quartz">Quartz</option><option value="vesper">Vesper</option><option value="willow">Willow</option><option value="bossa">Bossa</option></select></div><div><label for="limit">Call limit</label><select id="limit"><option value="1">1 minute</option><option value="3">3 minutes</option><option value="5">5 minutes</option><option value="10">10 minutes</option></select></div></div>
+<label for="voice-rate">Estimated voice USD / minute</label><input id="voice-rate" type="number" min="0" max="10" step="0.01"><p class="field-hint">Planning estimate, not your account balance. Backend cost is added separately.</p></details>
+<div class="save-row"><button id="save" class="button secondary">Save profile</button><button id="reset" class="text-button">Reset</button><span id="save-status" aria-live="polite">Saved</span></div>
 </section>
-<section class="panel call-panel"><div class="panel-heading"><h2>Call simulator</h2><span class="small-label">02 / TALK</span></div>
+<section class="panel call-panel"><div class="panel-heading"><h2>Take the call</h2><span class="small-label">02 / TALK</span></div>
+<div class="demo-notice">Demo con IA · OpenAI y el modelo elegido procesan tu voz o transcripción. Transcripciones y registros se guardan en este equipo; no guardamos audio. Usa datos ficticios.</div>
 <div class="call-stage" id="call-stage"><div class="stage-meta"><span id="direction-badge">OUTBOUND CALL</span><span id="timer">00:00</span></div>
 <div class="orb-wrap"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orb"><div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div></div>
-<div class="caller-name">Alex <span>AI</span></div><p class="caller-role" id="caller-role">Relay · Meeting setter</p><div class="call-status" id="call-status" role="status">Ready when you are</div><p class="call-help" id="call-help">Simulate an incoming call from Alex.<br>You play the prospect.</p>
+<div class="caller-name">Alex <span>AI</span></div><p class="caller-role" id="caller-role">Aló · Meeting setter</p><div class="call-status" id="call-status" role="status">Ready when you are</div><p class="call-help" id="call-help">Alex te llama para venderte Aló.</p>
 <div class="call-buttons"><button class="button primary" id="start">↗ Simulate outbound call</button><button class="button primary" id="answer" hidden>Answer call</button><button class="button secondary" id="mute" hidden>Mute microphone</button><button class="button danger" id="end" hidden>End call</button></div>
-<div class="voice-footer"><span><i></i> GPT-Live 1</span><span>Full-duplex audio</span></div></div>
+<div class="voice-footer"><span><i></i> GPT-Live 1</span><span>Interrupt naturally</span></div></div>
 <div id="error" class="error" role="alert" hidden></div><audio id="remote-audio" autoplay controls hidden></audio>
-<div class="call-guide"><span class="guide-icon">✳</span><div><h3>Give it a real conversation.</h3><p>Interrupt, ask about pricing, say you're busy, or agree to a meeting. Watch the agent work.</p></div></div>
-<div class="session-stats"><div><span>VOICE TIME</span><strong id="usage">—</strong></div><div><span>BACKEND</span><strong id="backend-state">Standing by</strong></div><div><span>ACTIONS</span><strong id="action-count">0</strong></div></div>
-<p class="cost-note">Browser simulation · no phone charges. Live audio and backend requests use API credit. Calls close automatically at the selected limit.</p>
+<div class="session-stats"><div><span>VOICE TIME</span><strong id="usage">—</strong></div><div><span>BACKEND</span><strong id="backend-state">Standing by</strong></div><div><span>SAVED ACTIONS</span><strong id="action-count">0</strong></div></div>
+<div class="cost-strip"><span>Estimated call cost</span><strong id="call-cost">$0.0000</strong><small id="cost-breakdown">Voice + backend · phone charges $0</small></div>
+<p class="cost-note">Live audio uses API credit. No phone charges or real calendar invites.</p>
 </section>
-<section class="panel observe"><div class="panel-heading"><h2>Live workspace</h2><span class="small-label">03 / OBSERVE</span></div><div class="observe-tabs" role="tablist" aria-label="Workspace view"><button role="tab" aria-selected="true" data-view="transcript">Transcript</button><button role="tab" aria-selected="false" data-view="activity">Activity <span id="activity-count">0</span></button><button role="tab" aria-selected="false" data-view="records">Records <span id="record-count">0</span></button></div>
-<div class="feed" id="transcript"><div class="empty"><span>〰</span><h3>Every word, as it happens.</h3><p>Your conversation will appear here.<br>Tool activity has its own tab.</p></div></div><div class="feed" id="activity" hidden><div class="empty"><span>⌘</span><h3>A clear view of the work.</h3><p>Delegations and tool results appear here.</p></div></div><div class="feed" id="records" hidden></div>
-<div class="feed-footer"><span id="feed-caption">Live captions · saved locally</span><button id="export" class="text-button" disabled>Export call ↓</button></div>
+<section class="panel observe"><div class="panel-heading"><h2>See the result</h2><span class="small-label">03 / VERIFY</span></div><div class="observe-tabs" role="tablist" aria-label="Workspace view"><button role="tab" aria-selected="true" data-view="transcript">Conversation</button><button role="tab" aria-selected="false" data-view="agenda">Bookings</button><button role="tab" aria-selected="false" data-view="records">Leads <span id="record-count">0</span></button></div>
+<div class="feed" id="transcript"><div class="empty"><span>〰</span><h3>Start with a conversation.</h3><p>The booking is the proof.</p></div></div><div class="feed" id="records" hidden></div><div class="feed" id="agenda" hidden></div>
+<details class="diagnostics"><summary>Technical activity <span id="activity-count">0</span></summary><div class="feed" id="activity"><div class="empty"><p>Backend activity appears here.</p></div></div></details>
+<div class="feed-footer"><span id="feed-caption">Saved locally</span><button id="export" class="text-button" disabled>Export call ↓</button></div>
 </section>
-</div><footer>RELAY / VOICE LAB<span>Appointments and notes are demo records. No emails or calendar invites are sent.</span></footer>
-</main><script type="module" src="/app.js"></script></body></html>
+</div><footer>ALÓ / VOICE LAB<span>Demo bookings and leads stay on this computer.</span></footer>
+</main><link rel="stylesheet" href="/demo.css"><script type="module" src="/app.js"></script></body></html>

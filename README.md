@@ -1,62 +1,54 @@
-# Relay Voice Lab
+# Aló Voice Lab
 
-Local browser call simulator using **GPT-Live 1** for full-duplex speech and **Pi Agent Core** for delegated reasoning and tools.
+One demo promise: **turn a conversation into a confirmed appointment**. GPT-Live 1 handles speech; Pi handles three server-side tools.
+
+## The lean demo
+
+- Outbound: Alex sells Aló and asks for a 20-minute meeting when there is interest.
+- Inbound: Alex answers approved business questions and helps book a service.
+- Three tools: `check_availability`, `submit_appointment`, `save_lead`.
+- Approved facts are supplied in context, without a lookup round trip.
+- Notes, interest, follow-ups and do-not-contact use one lead record. Names/contact are optional; never fabricated.
+- Appointment lookup, rescheduling and cancellation are deleted. Change requests can be saved for follow-up but do not modify a booking.
+- The UI has Conversation, Bookings and Leads. Technical activity is collapsed; model, opening, voice prompt and three tool switches remain editable per mode.
+
+Opening: “Hola, soy Alex de Aló. Te presento a quien convierte llamadas en citas. Ya estás hablando con él.” Then wait.
+
+The workshop and prices are fictional. The hook is a pitch to test, not evidence of conversion performance. There is no approved Aló price, guaranteed saving, phone integration, real calendar connection, invitation delivery or human transfer.
 
 ## Run
 
 ```sh
-cd /Users/sol/S.E.F./voice-lab
 npm install
 npm start
 ```
 
-Open http://localhost:3210 in Edge or Chrome and allow microphone access. Headphones help avoid speaker echo.
+Open [the demo](http://localhost:3210/) and allow microphone access when starting a call. Outbound ringing is simulated; API usage begins after answering. Inbound starts after microphone setup. End call closes the voice session; calls are capped at the chosen duration.
 
-The server reads `OPENAI_API_KEY` from the ignored `.env` file. Optional `OPENROUTER_API_KEY` enables the OpenRouter model choices after a restart. The browser receives neither key. This demo binds to loopback and is intended for one local operator, not public hosting.
+`OPENAI_API_KEY` is read from ignored `.env`. Optional `OPENROUTER_API_KEY` enables the existing OpenRouter presets after restart. Keys never reach the browser. Only available models appear in the dropdown, except a previously selected unavailable model stays visible to explain its missing key. Free backend inference does not make voice free.
 
-## Try it
+## Records and booking safety
 
-- **Outbound:** click **Simulate outbound call**, then **Answer call**. You are the prospect; Alex seeks a short discovery meeting about an AI receptionist service. Ringing is simulated, and no Live session starts until you answer.
-- **Inbound:** select **Inbound**, then **Call Relay**. You are calling the business; Alex answers as its receptionist.
-- Each profile has its own voice prompt, backend prompt, opening line, enabled tools, voice and reasoning model. Saving or switching modes persists settings. Call controls lock configuration during a call; edits apply to the next call.
-- Interrupt naturally. Mute controls the microphone track. **End call** closes the Live session and waits for final usage.
-- In **Activity**, inspect Pi delegations and tool results. In **Records**, inspect locally saved notes, meeting requests, outcomes and messages. **Export call** downloads transcript, activity and usage as JSON.
+The local agenda has weekday one-hour blocks within 14 calendar days. A sales meeting occupies one block but lasts 20 minutes. Booking requires checked availability, explicit confirmation and a valid business timezone. Availability is rechecked on save. Retries deduplicate; competing bookings and attempts to create replacement bookings for the same contact in one call are rejected.
 
-Suggested tests: “Please note that I need coverage after hours”; “How much does this cost?”; “I'm not interested”; or agree on a meeting and supply a name, contact, exact date, time and timezone. Appointment requests require confirmation of the details.
+State, transcripts, leads and bookings are in ignored `data/state.json`; audio is not persisted. Existing records survive migrations. Before the lean migration, full state is copied to `data/state-before-lean-*.json`. Obsolete prompts and tool settings can be recovered there.
 
-## Models and tools
-
-GPT-Live stays fixed as the voice layer. Pi's reasoning model can be Luna, Terra or GPT-4.1 mini with the supplied OpenAI key. OpenRouter presets include Cerebras GPT-OSS 120B (strict provider routing), DeepSeek, Haiku, a free Nemotron variant and the free router. OpenRouter presets remain unavailable until its separate key is configured; those routes have not been live-verified. Free backend inference does not make the GPT-Live voice session free.
-
-Only the demo tools are exposed to Pi. There are no shell, filesystem-browsing, email or calendar tools. Records are stored in `data/state.json`, together with profiles and call transcripts. Audio recordings are not persisted. Meeting requests are local records; they do not reserve real availability or send invitations.
+Estimated cost uses cumulative voice duration and known Pi token prices. Unknown costs are labeled; this is not an account balance. Infrastructure and unrecorded failed initialization are excluded. A duration limit is not a dollar budget.
 
 ## Architecture
 
-```text
-Browser microphone ↔ WebRTC ↔ GPT-Live 1
-                                 ↕ sideband WebSocket
-                          local Node server
-                                 ↕ client delegation
-                            Pi Agent Core
-                                 ↕
-                       selected model + tools
-                                 ↕
-                        local JSON records
-```
+Browser audio uses WebRTC. A local Node server receives sideband events, serializes Pi delegations, executes enabled tools, and returns results to the voice session. Context includes the transcript, approved business facts and prior verified results. Hangup aborts pending work. The server binds to loopback, supports one call at a time, and closes sessions when browser heartbeats stop. This is not a production phone service.
 
-The backend receives authoritative transcript/delegation events on the sideband. Delegations are serialized, full transcript context and saved records are provided to Pi, and results return through `session.commentary.append`. Only the server executes tools. Tool availability is checked at execution, exact repeated records are deduplicated, and pending agents are aborted at hangup. Configuration is fixed per call. The browser handles the greeting and captions; the server owns tool execution and session closure.
-
-Calls default to a five-minute maximum, have one concurrent-session limit, and close if browser heartbeats stop. The server records cumulative `usage.seconds` (not the sum of usage snapshots) and marks missing final usage as incomplete. The time cap is not a dollar budget. Backend token usage is separately recorded. Failed WebRTC initialization may still incur the documented 15-second charge.
-
-## Verification
+## Checks
 
 ```sh
 npm test
-# Optional paid checks; use the project key and a few seconds of voice credit:
+# Optional paid backend integration check:
 node --env-file=.env test/backend-smoke.mjs
-node test/browser-smoke.mjs --live
+# Browser helper; --live adds a paid voice check:
+node test/browser-smoke.mjs
 ```
 
-The browser check launches an isolated headless Edge with synthetic microphone input. `--tools` additionally requires `/private/tmp/relay-test-utterance.wav` and speaks that fixture into the call. It is a test helper, not a runtime dependency. Test screenshots live in ignored `test-results/`.
+Unit tests cover the exact three-tool boundary, disabled/removed actions, context facts, mode isolation, lead deduplication, opt-out capture, confirmed booking, collisions, hangup, costs and migration recovery. The backend smoke covers lead capture, a checked booking, an unsupported change recorded as follow-up, and inbound follow-up.
 
-References: [Live WebRTC](https://developers.openai.com/api/docs/guides/voice-webrtc?api=live), [client delegation](https://developers.openai.com/api/docs/guides/live-delegation), [session lifecycle](https://developers.openai.com/api/docs/guides/live-conversations), [Pi](https://pi.dev/docs/latest/sdk).
+The optional browser helper uses an isolated headless Edge. `--tools --live` requires `/private/tmp/relay-test-utterance.wav`, a synthetic Spanish request to save an after-hours note. `--inbound --live` checks the inbound greeting. No real phone calls are made.

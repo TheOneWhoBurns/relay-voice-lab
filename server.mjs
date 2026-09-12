@@ -6,6 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { Store } from './store.mjs';
 import { catalog, defaults, toolInfo, validateConfig, liveInstructions } from './config.mjs';
 import { runBackend } from './agent.mjs';
+import { callMetrics } from './metrics.mjs';
+import { availability } from './agenda.mjs';
 const root=dirname(fileURLToPath(import.meta.url));
 const port=Number(process.env.PORT||3210);
 const store=new Store(process.env.DATA_DIR||resolve(root,'data'));
@@ -17,7 +19,7 @@ function log(call,type,data={}) { const entry={type,at:new Date().toISOString(),
 function send(call,event) { if(call.socket?.readyState!==WebSocket.OPEN)return false;call.socket.send(JSON.stringify({...event,event_id:event.event_id||randomUUID()}));return true; }
 function finish(call,finalized) {
   if(call.finished)return;call.finished=true;call.ending=true;call.agent?.abort();clearTimeout(call.limit);clearTimeout(call.closeTimer);clearInterval(call.heartbeat);
-  call.status=finalized?'closed':'incomplete';call.endedAt=new Date().toISOString();store.saveCall(call);publish('call.ended',{callId:call.id,finalized,usage:call.usage});call.socket?.close();
+  call.status=finalized?'closed':'incomplete';call.endedAt=new Date().toISOString();store.saveCall(call);publish('call.ended',{callId:call.id,finalized,usage:call.usage,metrics:callMetrics(call,store.state.records)});call.socket?.close();
 }
 function closeCall(call) {
   if(call.finished||call.ending)return;call.ending=true;call.agent?.abort();call.status='closing';
@@ -32,6 +34,7 @@ async function delegate(call,event) {
     try {const result=await runBackend(call,store,(t,d)=>log(call,t,d));if(call.ending)return;call.results.push(result);send(call,{type:'session.commentary.append',delegation_id:id,content:result});log(call,'backend.finished',{result,elapsedMs:Date.now()-start});}
     catch(error){ if(call.ending)return;log(call,'backend.error',{message:error.message});send(call,{type:'session.commentary.append',delegation_id:id,content:'The backend could not complete the request. Do not claim any new action succeeded. Ask the caller to retry or take a different next step.'}); }
     store.saveCall(call);
+    publish('metrics',{callId:call.id,metrics:callMetrics(call,store.state.records)});
   }).catch(error=>log(call,'backend.error',{message:error.message}));
 }
 async function attach(call) {
@@ -41,7 +44,7 @@ async function attach(call) {
     if(event.type==='session.input_transcript.delta'||event.type==='session.output_transcript.delta') {
       call.transcript.push({speaker:event.type.includes('input_')?'Caller':'Alex',delta:event.delta,start_ms:event.start_ms,end_ms:event.end_ms});
     } else if(event.type==='session.delegation.created')delegate(call,event);
-    else if(event.type==='session.usage.updated'){call.usage=event.usage;publish('usage',{callId:call.id,usage:call.usage});}
+    else if(event.type==='session.usage.updated'){call.usage=event.usage;publish('usage',{callId:call.id,usage:call.usage,metrics:callMetrics(call,store.state.records)});}
     else if(event.type==='session.closed'){call.usage=event.usage;finish(call,true);}
     else if(event.type==='error')log(call,'voice.error',{message:event.error?.message||'Voice API error',code:event.error?.code});
   });
@@ -59,10 +62,11 @@ app.use((req,res,next)=>{
   next();
 });
 app.use(express.json({limit:'128kb'}));
-app.get('/api/state',(_req,res)=>res.json({profiles:store.state.profiles,defaults,toolInfo,catalog:catalog.map(m=>({...m,available:m.provider==='openai'?!!process.env.OPENAI_API_KEY:!!process.env.OPENROUTER_API_KEY})),credentials:{openai:!!process.env.OPENAI_API_KEY,openrouter:!!process.env.OPENROUTER_API_KEY},records:store.state.records,calls:store.state.calls.map(({transcript,activity,...c})=>c)}));
+app.get('/api/state',(_req,res)=>res.json({profiles:store.state.profiles,defaults,toolInfo,catalog:catalog.map(m=>({...m,available:m.provider==='openai'?!!process.env.OPENAI_API_KEY:!!process.env.OPENROUTER_API_KEY})),credentials:{openai:!!process.env.OPENAI_API_KEY,openrouter:!!process.env.OPENROUTER_API_KEY},records:store.state.records,appointments:store.state.appointments,calls:store.state.calls.map(({transcript,activity,...c})=>({...c,metrics:c.metrics||callMetrics(c,store.state.records)})),activeCall:[...calls.values()].find(c=>!c.finished)?.id||null}));
+app.get('/api/agenda',(req,res)=>{const profile=store.state.profiles[req.query.mode||'outbound'];if(!profile)return res.status(400).json({error:'Invalid mode.'});try{res.json({...availability(store,profile.business,req.query.date),appointments:store.state.appointments.filter(a=>a.business===profile.business.name)});}catch(e){res.status(400).json({error:e.message});}});
 app.get('/api/events',(req,res)=>{res.set({'Content-Type':'text/event-stream','Connection':'keep-alive'});res.flushHeaders();res.write(': connected\n\n');listeners.add(res);const t=setInterval(()=>res.write(': heartbeat\n\n'),15000);req.on('close',()=>{listeners.delete(res);clearInterval(t);});});
 app.put('/api/profiles/:mode',(req,res)=>{if(!defaults[req.params.mode])return res.status(400).json({error:'Invalid mode.'});try{store.state.profiles[req.params.mode]=validateConfig(req.body);store.save();res.json({saved:true});}catch(e){res.status(400).json({error:e.message});}});
-app.get('/api/calls/:id',(req,res)=>{const call=store.state.calls.find(c=>c.id===req.params.id);return call?res.json(call):res.status(404).json({error:'Call not found.'});});
+app.get('/api/calls/:id',(req,res)=>{const call=store.state.calls.find(c=>c.id===req.params.id);return call?res.json({...call,metrics:call.metrics||callMetrics(call,store.state.records)}):res.status(404).json({error:'Call not found.'});});
 app.post('/api/session',async(req,res)=>{
   if(creating||[...calls.values()].some(c=>!c.finished))return res.status(409).json({error:'A call is already active. End it before starting another.'});
   const {mode,sdp}=req.body;if(!defaults[mode]||typeof sdp!=='string'||!sdp.startsWith('v=0'))return res.status(400).json({error:'A valid mode and SDP offer are required.'});
