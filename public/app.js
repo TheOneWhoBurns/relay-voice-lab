@@ -1,72 +1,171 @@
 const $=id=>document.getElementById(id);
-let state, mode='outbound', phase='idle', peer, events, microphone, callId, startedAt, heartbeat, timer, closeTimer, connectTimer, greetingId, generation=0, finalized=false;
-let captions=[], transcript=[], activity=[], actions=0, lastCallId;
+let state,mode='outbound',phase='idle',peer,events,microphone,callId,startedAt,heartbeat,timer,closeTimer,connectTimer,greetingId,generation=0,finalized=false,actions=0,outputGated=false,outputGateCount=0;
 const audio=$('remote-audio');
-async function api(path,method='GET',body){const r=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined});const data=await r.json();if(!r.ok)throw new Error(data.error||'Request failed.');return data;}
-function error(message){$('error').textContent=message;$('error').hidden=!message;}
-function setStatus(text){$('call-status').textContent=text;}
-function markDirty(){$('save-status').textContent='Unsaved';}
-function readConfig(){return {model:$('model').value,voice:$('voice').value,maxMinutes:Number($('limit').value),language:$('language').value,voiceRate:Number($('voice-rate').value),business:{name:$('business-name').value,timezone:$('business-timezone').value,brief:$('business-brief').value,facts:$('business-facts').value},prompt:$('prompt').value,backendPrompt:state.profiles[mode].backendPrompt,greeting:$('greeting').value,tools:Object.fromEntries(Object.keys(state.toolInfo).map(k=>[k,$('tool-'+k).checked]))};}
-function changeModelHint(){const m=state.catalog.find(m=>m.id===$('model').value);$('model-hint').textContent=m?.available?`${m.tag}. Handles reasoning and enabled tools.`:'Requires an OpenRouter key on the server.';}
-function drawProfile(){const p=state.profiles[mode];for(const [id,key]of [['model','model'],['voice','voice'],['limit','maxMinutes'],['prompt','prompt'],['greeting','greeting'],['language','language'],['voice-rate','voiceRate']])$(id).value=p[key];for(const key of ['name','timezone','brief','facts'])$('business-'+key).value=p.business[key];
-  $('tools').replaceChildren();for(const[k,v]of Object.entries(state.toolInfo)){const label=document.createElement('label');label.className='tool-row';const text=document.createElement('div'),strong=document.createElement('strong'),small=document.createElement('small');strong.textContent=v.label;small.textContent=v.description;text.append(strong,small);const check=document.createElement('input');check.type='checkbox';check.className='switch';check.id='tool-'+k;check.checked=p.tools[k];check.addEventListener('change',markDirty);label.append(text,check);$('tools').append(label);}
-  document.querySelectorAll('[data-mode]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.mode===mode)));
-  $('profile-title').textContent=mode==='outbound'?'Sell the meeting.':'Answer. Help. Book.';$('profile-description').textContent=mode==='outbound'?'One offer. A conversation. A confirmed time.':'Answer a service question and book a time.';
-  $('direction-badge').textContent=mode.toUpperCase()+' CALL';$('caller-role').textContent=mode==='outbound'?'Aló · Meeting setter':p.business.name+' · Recepción';$('start').textContent=mode==='outbound'?'↗ Simulate outbound call':'↙ Call the business';$('call-help').textContent=mode==='outbound'?'Alex te llama. Tú representas al dueño o gerente del negocio.':'Llama como cliente del negocio y prueba su atención.';
-  $('save-status').textContent='Saved';changeModelHint();refreshAgenda();
+
+async function api(path,method='GET',body){
+  const response=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined});
+  const data=await response.json();
+  if(!response.ok)throw new Error(data.error||'Request failed.');
+  return data;
 }
-async function saveProfile(){const profile=readConfig();await api('/api/profiles/'+mode,'PUT',profile);state.profiles[mode]=profile;$('save-status').textContent='Saved';}
-function lockConfig(locked){document.querySelectorAll('.setup input,.setup select,.setup textarea,.setup button').forEach(el=>el.disabled=locked);}
-function setPhase(next){phase=next;const busy=!['idle','ended'].includes(next);lockConfig(busy);$('start').hidden=busy;$('answer').hidden=next!=='ringing';$('end').hidden=!busy;$('mute').hidden=next!=='connected';$('end').textContent=next==='ringing'?'Decline':next==='closing'?'Closing…':'End call';$('end').disabled=next==='closing';$('call-stage').classList.toggle('live',next==='connected');$('call-stage').classList.toggle('ringing',next==='ringing');}
-function cleanup(message){clearInterval(heartbeat);clearInterval(timer);clearTimeout(closeTimer);clearTimeout(connectTimer);generation++;microphone?.getTracks().forEach(t=>t.stop());microphone=null;const oldEvents=events;events=null;oldEvents?.close();const oldPeer=peer;peer=null;oldPeer?.close();audio.srcObject=null;audio.hidden=true;setPhase('ended');if(message)setStatus(message);$('mute').textContent='Mute microphone';}
-function emptyFeed(id,title,message){const wrap=document.createElement('div');wrap.className='empty';const h=document.createElement('h3');h.textContent=title;const p=document.createElement('p');p.textContent=message;wrap.append(h,p);$(id).replaceChildren(wrap);}
-function resetCall(){captions=[];transcript=[];activity=[];actions=0;callId=null;finalized=false;greetingId=null;$('timer').textContent='00:00';$('usage').textContent='—';$('call-cost').textContent='$0.0000';$('cost-breakdown').textContent='Voice + backend · phone charges $0';$('backend-state').textContent='Standing by';$('activity-count').textContent='0';$('action-count').textContent='0';$('export').disabled=true;emptyFeed('transcript','Listening for the first words…','Captions will grow as you speak.');emptyFeed('activity','Waiting for the agent…','Tool work appears here.');error('');}
-function addTranscript(e){const speaker=e.type.includes('input_')?'Caller':'Alex';transcript.push({speaker,delta:e.delta,start_ms:e.start_ms,end_ms:e.end_ms});const feed=$('transcript'),follow=feed.scrollHeight-feed.scrollTop-feed.clientHeight<65;if(!captions.length)feed.replaceChildren();
-  // Each speaker grows independently; preserve fragment spacing exactly.
-  let row=[...captions].reverse().find(r=>r.speaker===speaker&&e.start_ms>=r.start&&e.start_ms-r.end<1600);
-  if(!row){const el=document.createElement('div');el.className='caption '+(speaker==='Caller'?'caller':'agent');const head=document.createElement('div');head.className='caption-head';const name=document.createElement('strong');name.textContent=speaker;const stamp=document.createElement('span');stamp.textContent=formatTime(e.start_ms/1000);head.append(name,stamp);const content=document.createElement('div');el.append(head,content);feed.append(el);row={speaker,start:e.start_ms,end:e.end_ms,el,content,text:''};captions.push(row);}row.text+=e.delta;row.end=e.end_ms;row.content.textContent=row.text;if(follow)feed.scrollTop=feed.scrollHeight;
+function setError(message){$('error').textContent=message;$('error').hidden=!message;}
+function setStatus(message){$('call-status').textContent=message;}
+function markDirty(){$('save-status').textContent='Unsaved';}
+function readConfig(){
+  return {
+    model:$('model').value,voice:$('voice').value,maxMinutes:Number($('limit').value),
+    language:$('language').value,voiceRate:Number($('voice-rate').value),
+    business:{name:$('business-name').value,timezone:$('business-timezone').value,brief:$('business-brief').value,facts:$('business-facts').value},
+    prompt:$('prompt').value,backendPrompt:$('backend-prompt').value,greeting:$('greeting').value,
+    tools:Object.fromEntries(Object.keys(state.toolInfo).map(key=>[key,$('tool-'+key).checked])),
+  };
+}
+function drawProfile(){
+  const profile=state.profiles[mode];
+  for(const [id,key] of [['model','model'],['voice','voice'],['limit','maxMinutes'],['prompt','prompt'],['backend-prompt','backendPrompt'],['greeting','greeting'],['language','language'],['voice-rate','voiceRate']])$(id).value=profile[key];
+  for(const key of ['name','timezone','brief','facts'])$('business-'+key).value=profile.business[key];
+  $('research-backend').value=state.researchContext?.backend||'';
+  $('research-status').textContent=state.researchContext?.version||'';
+  $('tools').replaceChildren();
+  for(const [key,info] of Object.entries(state.toolInfo)){
+    const label=document.createElement('label');label.className='tool-row';
+    const text=document.createElement('span');text.textContent=key+' — '+info.description;
+    const input=document.createElement('input');input.type='checkbox';input.id='tool-'+key;input.checked=profile.tools[key];input.addEventListener('change',markDirty);
+    label.append(text,input);$('tools').append(label);
+  }
+  document.querySelectorAll('[data-mode]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.mode===mode)));
+  const selected=state.catalog.find(item=>item.id===profile.model);
+  $('model-hint').textContent=selected?selected.provider+':'+selected.model:'';
+  $('start').textContent=mode==='outbound'?'Start outbound call':'Start inbound call';
+  $('save-status').textContent='Saved';setStatus('Ready');
+}
+async function saveProfile(){
+  const profile=readConfig();
+  await api('/api/profiles/'+mode,'PUT',profile);
+  state.profiles[mode]=profile;$('save-status').textContent='Saved';
+}
+function lockConfig(locked){document.querySelectorAll('.setup input,.setup select,.setup textarea,.setup button').forEach(element=>element.disabled=locked);}
+function setPhase(next){
+  phase=next;const busy=!['idle','ended'].includes(next);lockConfig(busy);
+  $('start').hidden=busy;$('answer').hidden=next!=='ringing';$('mute').hidden=next!=='connected';$('end').hidden=!busy;
+  $('end').textContent=next==='ringing'?'Cancel':next==='closing'?'Closing':'End call';$('end').disabled=next==='closing';
+}
+function cleanup(message){
+  clearInterval(heartbeat);clearInterval(timer);clearTimeout(closeTimer);clearTimeout(connectTimer);generation++;
+  microphone?.getTracks().forEach(track=>track.stop());microphone=null;
+  const oldEvents=events;events=null;oldEvents?.close();
+  const oldPeer=peer;peer=null;oldPeer?.close();audio.srcObject=null;audio.hidden=true;audio.muted=false;outputGated=false;
+  setPhase('ended');if(message)setStatus(message);$('mute').textContent='Mute microphone';
+}
+function resetCall(){
+  actions=0;callId=null;finalized=false;greetingId=null;outputGated=false;outputGateCount=0;audio.muted=false;audio.dataset.gateCount='0';
+  $('timer').textContent='00:00';$('usage').textContent='—';$('context-usage').textContent='—';$('call-cost').textContent='$0.0000';$('cost-breakdown').textContent='';
+  $('backend-state').textContent='Idle';$('activity-count').textContent='0';$('action-count').textContent='0';
+  $('transcript').replaceChildren();$('activity').replaceChildren();setError('');
 }
 function formatTime(seconds){return `${Math.floor(seconds/60).toString().padStart(2,'0')}:${Math.floor(seconds%60).toString().padStart(2,'0')}`;}
-function addActivity(entry){if(!activity.length)$('activity').replaceChildren();activity.push(entry);$('activity-count').textContent=String(activity.length);const el=document.createElement('div');el.className='activity-item';const title=document.createElement('h3');title.textContent=entry.type.replaceAll('.',' · ').replaceAll('_',' ');const p=document.createElement('p');p.textContent=entry.message||entry.result&&typeof entry.result==='string'&&entry.result||entry.tool||entry.model||'';const time=document.createElement('small');time.textContent=new Date(entry.at).toLocaleTimeString()+(entry.elapsedMs?` · ${entry.elapsedMs} ms`:'');el.append(title,p,time);$('activity').append(el);
-  if(entry.type==='backend.started')$('backend-state').textContent='Working…';if(entry.type==='backend.finished')$('backend-state').textContent=(entry.elapsedMs/1000).toFixed(1)+'s last task';if(entry.type==='backend.error'){$('backend-state').textContent='Needs attention';error(entry.message);}
-  if(entry.type==='record.saved'){actions++;$('action-count').textContent=actions;refreshRecords();}if(entry.type==='voice.error'||entry.type==='connection.error')error(entry.message);
+function gateOutput(gated){
+  if(outputGated===gated)return;
+  outputGated=gated;audio.muted=gated;
+  if(gated)outputGateCount++;
+  audio.dataset.gateCount=String(outputGateCount);
 }
-async function refreshRecords(){try{const data=await api('/api/state');state.records=data.records;drawRecords();refreshAgenda();}catch(e){error(e.message);}}
-function metricUI(m){if(!m)return;$('call-cost').textContent='$'+m.estimatedTotal.toFixed(4)+(m.backendCostComplete?'':' + unknown');$('cost-breakdown').textContent=`Voice $${m.voiceCost.toFixed(4)} · backend $${m.backendCost.toFixed(4)}${m.backendCostComplete?'':' (partial)'} · ${m.finalized?'final duration':'provisional duration'} · excludes infrastructure`;}
-async function refreshAgenda(){try{const data=await api('/api/agenda?mode='+mode),root=$('agenda');root.replaceChildren();const info=document.createElement('p');info.className='agenda-description';info.textContent=`${data.business} · ${data.timezone}. Agenda de prueba, bloques de 1 hora, lunes a viernes dentro de los próximos 14 días. Horarios libres más próximos:`;root.append(info);const slots=document.createElement('div');slots.className='slot-list';for(const s of data.slots){const el=document.createElement('div');el.className='slot';const date=document.createElement('strong');date.textContent=s.date;el.append(date,document.createTextNode(s.time));slots.append(el);}if(!data.slots.length)slots.textContent='No hay horarios libres.';root.append(slots);for(const a of [...data.appointments].reverse()){const el=document.createElement('div');el.className='record';const h=document.createElement('h3');h.textContent=`${a.status==='booked'?'Reservada':'Cancelada'} · ${a.date} ${a.time}`;const p=document.createElement('p');p.textContent=`${a.name} · ${a.purpose}`;el.append(h,p);root.append(el);}}catch(e){error(e.message);}}
-function drawRecords(){const leads=state.records.filter(r=>r.tool!=='submit_appointment'&&r.tool!=='reschedule_appointment'&&r.tool!=='cancel_appointment');$('record-count').textContent=leads.length;$('records').replaceChildren();if(!leads.length){emptyFeed('records','Keep the next step.','Interest and follow-up details appear here.');return;}for(const r of leads){const el=document.createElement('div');el.className='record';const badge=document.createElement('span');badge.className='pill';badge.textContent=r.mode.toUpperCase()+' · LOCAL';const title=document.createElement('h3');title.textContent=state.toolInfo[r.tool]?.label||r.tool;el.append(badge,title);for(const[k,v]of Object.entries(r.data)){if(k==='confirmed')continue;const p=document.createElement('p');p.textContent=`${k.replaceAll('_',' ')}: ${v}`;el.append(p);}const time=document.createElement('small');time.textContent=new Date(r.createdAt).toLocaleString();el.append(time);$('records').append(el);}}
-function send(e){if(events?.readyState==='open')events.send(JSON.stringify(e));}
-async function connect(){setPhase('connecting');setStatus('Connecting your microphone…');const token=++generation;
-  try{microphone=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});if(token!==generation){microphone.getTracks().forEach(t=>t.stop());return;}
-    const connection=new RTCPeerConnection();peer=connection;connection.addEventListener('track',e=>{if(token!==generation)return;audio.srcObject=new MediaStream([e.track]);audio.play().catch(()=>{audio.hidden=false;error('Press play on the audio controls to hear Alex.');});});
+function addTranscript(event){
+  const speaker=event.type.includes('input_')?'Caller':'Voice',feed=$('transcript');
+  let row=[...feed.querySelectorAll('.caption')].at(-1);
+  if(!row||row.dataset.speaker!==speaker||Number(event.start_ms)-Number(row.dataset.end)>=1600){
+    row=document.createElement('div');row.className='caption '+(speaker==='Caller'?'caller':'agent');row.dataset.speaker=speaker;
+    const head=document.createElement('div');head.className='caption-head';head.textContent=speaker+' · '+formatTime((event.start_ms||0)/1000)+(speaker==='Voice'&&outputGated?' · playback suppressed':'');
+    const content=document.createElement('div');row.append(head,content);feed.append(row);
+  }
+  if(speaker==='Voice'&&outputGated)row.dataset.suppressed='true';
+  row.dataset.end=event.end_ms||event.start_ms||0;row.lastElementChild.textContent+=event.delta||'';feed.scrollTop=feed.scrollHeight;
+}
+function addActivity(entry){
+  const item=document.createElement('div');item.className='activity-item';
+  const title=document.createElement('h3');title.textContent=entry.type+' · '+entry.at;
+  const data=document.createElement('pre');const payload={...entry};delete payload.type;delete payload.at;data.textContent=JSON.stringify(payload,null,2);
+  item.append(title,data);$('activity').append(item);$('activity-count').textContent=String($('activity').children.length);
+  if(entry.type==='backend.started')$('backend-state').textContent='Running';
+  if(entry.type==='backend.stale')$('backend-state').textContent='Superseded';
+  if(entry.type==='backend.finished'){gateOutput(false);$('backend-state').textContent='Complete · '+entry.elapsedMs+' ms';}
+  if(entry.type==='backend.error'){gateOutput(false);$('backend-state').textContent='Error';setError(entry.message);}
+  if(entry.type==='record.saved'){actions++;$('action-count').textContent=String(actions);}
+  if(entry.type==='voice.error'||entry.type==='connection.error')setError(entry.message);
+}
+function metricUI(metrics){
+  if(!metrics)return;
+  $('call-cost').textContent='$'+metrics.estimatedTotal.toFixed(4)+(metrics.backendCostComplete?'':' + unknown');
+  $('cost-breakdown').textContent=JSON.stringify({voice:metrics.voiceCost,backend:metrics.backendCost,finalized:metrics.finalized});
+}
+function send(event){if(events?.readyState==='open')events.send(JSON.stringify(event));}
+async function connect(){
+  setPhase('connecting');setStatus('Connecting');const token=++generation;
+  try{
+    microphone=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    if(token!==generation){microphone.getTracks().forEach(track=>track.stop());return;}
+    const connection=new RTCPeerConnection();peer=connection;
+    connection.addEventListener('track',event=>{if(token!==generation)return;audio.srcObject=new MediaStream([event.track]);audio.play().catch(()=>{audio.hidden=false;setError('Audio playback is blocked. Use the audio control.');});});
     for(const track of microphone.getAudioTracks())connection.addTrack(track,microphone);
     events=connection.createDataChannel('oai-events');const channel=events;
-    channel.addEventListener('message',({data})=>{if(token!==generation)return;const e=JSON.parse(data);
-      if(e.type==='session.started'){clearTimeout(connectTimer);setPhase('connected');setStatus('Connected · speak naturally');$('call-help').textContent='Puedes interrumpir a Alex en cualquier momento.';startedAt=Date.now();timer=setInterval(()=>$('timer').textContent=formatTime((Date.now()-startedAt)/1000),1000);greetingId=crypto.randomUUID();const config=state.profiles[mode];send({type:'session.instructions.append',event_id:greetingId,delegation_id:null,content:`Speak ${config.language==='es'?'Spanish':'English'} initially; translate the opening into that language if needed. Greet immediately, then pause and listen. The browser already labels this as an AI demo. Opening: ${config.greeting.replaceAll('{business}',config.business.name)}`});}
-      else if(e.type==='session.instructions.appended'&&e.client_event_id===greetingId){send({type:'session.commentary.append',event_id:crypto.randomUUID(),delegation_id:null,content:'Begin the conversation now, following the opening instructions.'});greetingId=null;}
-      else if(e.type==='session.input_transcript.delta'||e.type==='session.output_transcript.delta')addTranscript(e);
-      else if(e.type==='session.usage.updated')$('usage').textContent=Math.ceil(e.usage.seconds)+' sec';
-      else if(e.type==='session.closed'){finalized=true;$('usage').textContent=Math.ceil(e.usage?.seconds||0)+' sec · final';cleanup('Call complete');refreshRecords();}
-      else if(e.type==='error')error(e.error?.message||'Voice session error.');
-    });channel.addEventListener('close',()=>{if(token!==generation)return;if(!finalized){if(callId)api('/api/calls/'+callId+'/close','POST',{}).catch(()=>{});cleanup('Disconnected · final usage unconfirmed');}});
-    connection.addEventListener('connectionstatechange',()=>{if(token===generation&&connection.connectionState==='failed'){error('Voice connection failed. Please try another call.');endCall();}});
-    await connection.setLocalDescription(await connection.createOffer());if(connection.iceGatheringState!=='complete')await new Promise((res,rej)=>{const t=setTimeout(()=>rej(new Error('Microphone network setup timed out.')),10000);function check(){if(connection.iceGatheringState==='complete'){clearTimeout(t);connection.removeEventListener('icegatheringstatechange',check);res();}}connection.addEventListener('icegatheringstatechange',check);check();});
-    if(token!==generation)return;setStatus('Connecting to Alex…');const data=await api('/api/session','POST',{mode,sdp:connection.localDescription.sdp});if(token!==generation){await api('/api/calls/'+data.session.id+'/close','POST',{});return;}
-    callId=data.session.id;lastCallId=callId;$('export').disabled=false;heartbeat=setInterval(()=>api('/api/calls/'+callId+'/heartbeat','POST',{}).catch(()=>{}),5000);
-    await connection.setRemoteDescription({type:'answer',sdp:data.transport.sdp});connectTimer=setTimeout(()=>{error('The voice session did not start in time.');endCall();},25000);
-  }catch(e){if(token!==generation)return;if(callId)api('/api/calls/'+callId+'/close','POST',{}).catch(()=>{});error(e.name==='NotAllowedError'?'Allow microphone access in your browser, then try again.':e.message);cleanup('Unable to connect');}
+    channel.addEventListener('message',({data})=>{
+      if(token!==generation)return;const event=JSON.parse(data);
+      if(event.type==='session.started'){
+        clearTimeout(connectTimer);setPhase('connected');setStatus('Connected');startedAt=Date.now();
+        timer=setInterval(()=>$('timer').textContent=formatTime((Date.now()-startedAt)/1000),1000);
+        greetingId=crypto.randomUUID();const config=state.profiles[mode];
+        send({type:'session.instructions.append',event_id:greetingId,delegation_id:null,content:`Speak ${config.language==='es'?'Spanish':'English'} initially. Speak the configured opening immediately without adding an introduction. Pause naturally at punctuation, then listen. Opening: ${config.greeting.replaceAll('{business}',config.business.name)}`});
+      }else if(event.type==='session.instructions.appended'&&event.client_event_id===greetingId){
+        send({type:'session.commentary.append',event_id:crypto.randomUUID(),delegation_id:null,content:'Begin with the configured opening now.'});greetingId=null;
+      }else if(event.type==='session.input_transcript.delta'||event.type==='session.output_transcript.delta'){
+        if(event.type==='session.input_transcript.delta')gateOutput(true);
+        addTranscript(event);
+      }
+      else if(event.type==='session.commentary.appended'&&outputGated){
+        // Fallback only. The normal release is the earlier local
+        // backend.finished event; an append acknowledgment may arrive after
+        // speech has already started.
+        setTimeout(()=>{if(outputGated)gateOutput(false);},250);
+      }
+      else if(event.type==='session.usage.updated'){$('usage').textContent=JSON.stringify(event.usage);if(Number.isFinite(event.context_window?.usage_ratio))$('context-usage').textContent=(event.context_window.usage_ratio*100).toFixed(1)+'%';}
+      else if(event.type==='session.closed'){finalized=true;$('usage').textContent=JSON.stringify(event.usage||{});cleanup('Closed');}
+      else if(event.type==='error')setError(event.error?.message||'Voice session error.');
+    });
+    channel.addEventListener('close',()=>{if(token===generation&&!finalized)cleanup('Disconnected');});
+    connection.addEventListener('connectionstatechange',()=>{if(token===generation&&connection.connectionState==='failed'){setError('Voice connection failed.');endCall();}});
+    await connection.setLocalDescription(await connection.createOffer());
+    if(connection.iceGatheringState!=='complete')await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('ICE timeout')),10000);function check(){if(connection.iceGatheringState==='complete'){clearTimeout(timeout);connection.removeEventListener('icegatheringstatechange',check);resolve();}}connection.addEventListener('icegatheringstatechange',check);check();});
+    if(token!==generation)return;
+    const data=await api('/api/session','POST',{mode,sdp:connection.localDescription.sdp});
+    if(token!==generation){await api('/api/calls/'+data.session.id+'/close','POST',{});return;}
+    callId=data.session.id;heartbeat=setInterval(()=>api('/api/calls/'+callId+'/heartbeat','POST',{}).catch(()=>{}),5000);
+    await connection.setRemoteDescription({type:'answer',sdp:data.transport.sdp});
+    connectTimer=setTimeout(()=>{setError('Session start timeout');endCall();},25000);
+  }catch(error){
+    if(token!==generation)return;if(callId)api('/api/calls/'+callId+'/close','POST',{}).catch(()=>{});
+    setError(error.name==='NotAllowedError'?'Microphone permission denied.':error.message);cleanup('Failed');
+  }
 }
-async function endCall(){if(phase==='ringing'||phase==='connecting'&&!callId){cleanup('Call canceled');return;}if(!callId){cleanup('Call ended');return;}setPhase('closing');setStatus('Finishing call…');try{await api('/api/calls/'+callId+'/close','POST',{});}catch{send({type:'session.close'});}closeTimer=setTimeout(()=>cleanup('Call ended · final usage unconfirmed'),17000);}
-$('start').addEventListener('click',async()=>{try{await saveProfile();resetCall();if(mode==='outbound'){setPhase('ringing');setStatus('Alex is calling you…');$('call-help').textContent='Answer to begin the browser call. No API usage until you answer.';}else await connect();}catch(e){error(e.message);}});
-$('answer').addEventListener('click',()=>connect());$('end').addEventListener('click',endCall);
-$('mute').addEventListener('click',()=>{if(!microphone)return;const enabled=microphone.getAudioTracks()[0]?.enabled;microphone.getAudioTracks().forEach(t=>t.enabled=!enabled);$('mute').textContent=enabled?'Unmute microphone':'Mute microphone';});
-$('save').addEventListener('click',()=>saveProfile().catch(e=>error(e.message)));
+async function endCall(){
+  if(phase==='ringing'||phase==='connecting'&&!callId){cleanup('Canceled');return;}
+  if(!callId){cleanup('Closed');return;}
+  setPhase('closing');setStatus('Closing');
+  try{await api('/api/calls/'+callId+'/close','POST',{});}catch{send({type:'session.close'});}
+  closeTimer=setTimeout(()=>cleanup('Closed · usage unconfirmed'),17000);
+}
+$('start').addEventListener('click',async()=>{try{await saveProfile();resetCall();if(mode==='outbound'){setPhase('ringing');setStatus('Ringing');}else await connect();}catch(error){setError(error.message);}});
+$('answer').addEventListener('click',connect);$('end').addEventListener('click',endCall);
+$('mute').addEventListener('click',()=>{if(!microphone)return;const enabled=microphone.getAudioTracks()[0]?.enabled;microphone.getAudioTracks().forEach(track=>track.enabled=!enabled);$('mute').textContent=enabled?'Unmute microphone':'Mute microphone';});
+$('save').addEventListener('click',()=>saveProfile().catch(error=>setError(error.message)));
 $('reset').addEventListener('click',()=>{state.profiles[mode]=structuredClone(state.defaults[mode]);drawProfile();markDirty();});
-document.querySelectorAll('[data-mode]').forEach(button=>button.addEventListener('click',async()=>{try{await saveProfile();mode=button.dataset.mode;drawProfile();setStatus('Ready when you are');error('');}catch(e){error(e.message);}}));
-document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener('click',()=>{for(const b of document.querySelectorAll('[data-view]')){const active=b===button;b.setAttribute('aria-selected',String(active));$(b.dataset.view).hidden=!active;}}));
-for(const id of ['model','voice','limit','prompt','greeting','language','voice-rate','business-name','business-timezone','business-brief','business-facts'])$(id).addEventListener('input',()=>{markDirty();if(id==='model')changeModelHint();});
-$('export').addEventListener('click',async()=>{try{const data=await api('/api/calls/'+lastCallId);if(callId===lastCallId&&transcript.length)data.transcript=transcript;const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`alo-${mode}-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){error(e.message);}});
-window.addEventListener('pagehide',()=>{if(callId&&phase!=='ended'){navigator.sendBeacon('/api/calls/'+callId+'/close',new Blob(['{}'],{type:'application/json'}));microphone?.getTracks().forEach(t=>t.stop());peer?.close();}});
-try{state=await api('/api/state');for(const m of state.catalog.filter(m=>m.available||Object.values(state.profiles).some(p=>p.model===m.id))){const option=document.createElement('option');option.value=m.id;option.textContent=m.label+(m.available?'':' — key needed');option.disabled=!m.available;$('model').append(option);}drawProfile();drawRecords();$('api-status').textContent=state.credentials.openai?'OpenAI key configured':'OpenAI key needed';
-  const stream=new EventSource('/api/events');stream.onmessage=({data})=>{const e=JSON.parse(data);if(e.callId!==callId)return;if(e.type==='activity')addActivity(e.entry);if(e.metrics)metricUI(e.metrics);if(e.type==='usage')$('usage').textContent=Math.ceil(e.usage.seconds)+' sec';if(e.type==='call.ended'){finalized=e.finalized;$('usage').textContent=Math.ceil(e.usage?.seconds||0)+' sec'+(e.finalized?' · final':'');cleanup(e.finalized?'Call complete':'Call ended · final usage unconfirmed');refreshRecords();}};
-}catch(e){error(e.message);$('api-status').textContent='Server unavailable';$('start').disabled=true;}
+document.querySelectorAll('[data-mode]').forEach(button=>button.addEventListener('click',async()=>{try{await saveProfile();mode=button.dataset.mode;drawProfile();setError('');}catch(error){setError(error.message);}}));
+for(const id of ['model','voice','limit','prompt','backend-prompt','greeting','language','voice-rate','business-name','business-timezone','business-brief','business-facts'])$(id).addEventListener('input',()=>{markDirty();if(id==='model'){const selected=state.catalog.find(item=>item.id===$('model').value);$('model-hint').textContent=selected?selected.provider+':'+selected.model:'';}});
+try{
+  state=await api('/api/state');
+  for(const item of state.catalog.filter(item=>item.available||Object.values(state.profiles).some(profile=>profile.model===item.id))){
+    const option=document.createElement('option');option.value=item.id;option.textContent=item.id+(item.available?'':' — unavailable');option.disabled=!item.available;$('model').append(option);
+  }
+  drawProfile();$('api-status').textContent=state.credentials.openai?'API configured':'API missing';
+  const stream=new EventSource('/api/events');
+  stream.onmessage=({data})=>{const event=JSON.parse(data);if(event.callId!==callId)return;if(event.type==='activity')addActivity(event.entry);if(event.metrics)metricUI(event.metrics);if(event.type==='usage'){$('usage').textContent=JSON.stringify(event.usage);if(Number.isFinite(event.contextWindow?.usageRatio))$('context-usage').textContent=(event.contextWindow.usageRatio*100).toFixed(1)+'% · '+event.contextWindow.band;}if(event.type==='call.ended'){finalized=event.finalized;$('usage').textContent=JSON.stringify(event.usage||{});cleanup(event.finalized?'Closed':'Closed · usage unconfirmed');}};
+}catch(error){setError(error.message);$('api-status').textContent='Server unavailable';$('start').disabled=true;}

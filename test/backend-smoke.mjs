@@ -9,13 +9,30 @@ import { runBackend } from '../agent.mjs';
 import { availability } from '../agenda.mjs';
 const store=new Store(mkdtempSync(join(tmpdir(),'relay-smoke-')));
 const call={id:'smoke',mode:'outbound',status:'connected',config:structuredClone(defaults.outbound),transcript:[{speaker:'Caller',start_ms:0,delta:'Please record a note that I am interested in covering missed calls after hours.'}],backendUsage:[],results:[]};
-const result=await runBackend(call,store,(type,data)=>console.log(type,data.tool||''));
+const result=await runBackend(call,store,(type,data)=>console.log(type,data.tool||'',data.message||''));
 console.log('Backend result:',result);
 assert.equal(store.state.records.length,1);assert.equal(store.state.records[0].tool,'save_lead');console.log(JSON.stringify({result,records:store.state.records.length,usage:call.backendUsage}));
+assert.equal(store.state.records[0].data.name,undefined);assert.equal(store.state.records[0].data.contact,undefined);
 const slots=availability(store,defaults.outbound.business).slots;
-const appointment={id:'smoke-appointment',mode:'outbound',status:'connected',config:structuredClone(defaults.outbound),transcript:[{speaker:'Caller',start_ms:0,delta:`Quiero una revisión de frenos el ${slots[0].date} a las ${slots[0].time}, America/Guayaquil. Soy Morgan Demo, morgan@example.com.`},{speaker:'Alex',start_ms:100,delta:`Confirmo: Morgan Demo, morgan@example.com, revisión de frenos el ${slots[0].date} a las ${slots[0].time}, America/Guayaquil. ¿Reservo si está disponible en la agenda de prueba?`},{speaker:'Caller',start_ms:200,delta:'Sí, confirmo. Reserva ese horario si está disponible.'}],backendUsage:[],results:[]};
+const appointment={id:'smoke-appointment',mode:'outbound',status:'connected',config:structuredClone(defaults.outbound),transcript:[{speaker:'Caller',start_ms:0,delta:`Quiero una consulta de valoración el ${slots[0].date} a las ${slots[0].time}, America/Guayaquil. Soy Morgan Demo, morgan@example.com.`},{speaker:'Alex',start_ms:100,delta:`Confirmo: Morgan Demo, morgan@example.com, consulta de valoración el ${slots[0].date} a las ${slots[0].time}, America/Guayaquil. ¿Reservo si está disponible en la agenda de prueba?`},{speaker:'Caller',start_ms:200,delta:'Sí, confirmo. Reserva ese horario si está disponible.'}],backendUsage:[],results:[]};
 const booked=await runBackend(appointment,store,()=>{});console.log('Appointment:',booked);assert.ok(store.state.records.some(r=>r.callId===appointment.id&&r.tool==='submit_appointment'));appointment.results.push(booked);
 appointment.transcript.push({speaker:'Caller',start_ms:300,delta:`Cambia mi cita al ${slots[1].date} a las ${slots[1].time}, misma zona horaria.`},{speaker:'Alex',start_ms:400,delta:`¿Confirmas mover la cita al ${slots[1].date} a las ${slots[1].time}, America/Guayaquil?`},{speaker:'Caller',start_ms:500,delta:'Sí, confirmo el cambio.'});
 console.log('Change request saved as follow-up:',await runBackend(appointment,store,()=>{}));assert.equal(store.state.appointments.length,1);assert.equal(store.state.appointments[0].time,slots[0].time);assert.equal(store.state.appointments[0].version,1);assert.ok(store.state.records.some(r=>r.callId===appointment.id&&r.tool==='save_lead'&&r.data.outcome==='follow_up'));
-const inbound={id:'smoke-inbound',mode:'inbound',status:'connected',config:{...structuredClone(defaults.inbound),model:'openai:gpt-5.6-terra'},transcript:[{speaker:'Caller',start_ms:0,delta:'Quiero hablar con una persona. Soy Morgan Demo y mi correo es morgan@example.com. Pide que me contacten para una cotización de cambio de aceite.'}],backendUsage:[],results:[]};
+const inbound={id:'smoke-inbound',mode:'inbound',status:'connected',config:{...structuredClone(defaults.inbound),model:'openai:gpt-5.6-terra'},transcript:[{speaker:'Caller',start_ms:0,delta:'Quiero hablar con una persona. Soy Morgan Demo y mi correo es morgan@example.com. Pide que me contacten para confirmar el precio de una consulta de valoración.'}],backendUsage:[],results:[]};
 console.log('Inbound Terra:',await runBackend(inbound,store,()=>{}));assert.ok(store.state.records.some(r=>r.callId===inbound.id&&r.tool==='save_lead'));console.log('Backend scenarios passed: lead, checked booking, unsupported change saved as follow-up, inbound follow-up.');
+
+// Behavior probes: no actions requested, including when all tools are unavailable.
+for(const [id,mode,text] of [
+  ['correction','outbound','No necesitamos más pacientes. Recepción no puede contestar mientras cobra.'],
+  ['price','outbound','¿Cuánto cuesta Aló? No quiero agendar una reunión, solo saber el precio.'],
+  ['rejection','outbound','No nos interesa. Ya tenemos todas las llamadas cubiertas, gracias.'],
+  ['inbound-question','inbound','¿Cuánto cuesta una consulta de valoración?'],
+]){
+  const probe={id,mode,status:'connected',config:structuredClone(defaults[mode]),transcript:[{speaker:'Caller',start_ms:0,delta:text}],backendUsage:[],results:[]};
+  if(id==='correction')for(const key of Object.keys(probe.config.tools))probe.config.tools[key]=false;
+  const before=store.state.records.length,started=Date.now();
+  const decision=await runBackend(probe,store,()=>{});
+  assert.equal(store.state.records.length,before,`${id}: no unsolicited record`);
+  assert.equal(typeof decision.direction,'string');assert.equal(typeof decision.substance,'string');
+  console.log(JSON.stringify({probe:id,decision,elapsedMs:Date.now()-started}));
+}
